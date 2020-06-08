@@ -12,9 +12,20 @@ import (
 
 var xc *xgb.Conn
 var xroot xproto.ScreenInfo
-var quitSignal error = errors.New("Quit")
+var quitSignal error = errors.New("quit")
 var keymap [256][]xproto.Keysym
 var attachedScreens []xinerama.ScreenInfo
+
+var (
+	atomNetActiveWindow xproto.Atom
+	atomNetWMName       xproto.Atom
+	atomWindow          xproto.Atom
+	atomWMClass         xproto.Atom
+	atomWMDeleteWindow  xproto.Atom
+	atomWMProtocols     xproto.Atom
+	atomWMTakeFocus     xproto.Atom
+	atomWMTransientFor  xproto.Atom
+)
 
 func takeOwnership() error {
 	return xproto.ChangeWindowAttributesChecked(
@@ -57,8 +68,6 @@ func main() {
 		log.Fatal("couldn't parse x conn info")
 	}
 
-	xroot = setup.Roots[0]
-
 	if err := xinerama.Init(xc); err != nil {
 		log.Fatal(err)
 	}
@@ -87,12 +96,8 @@ func main() {
 		}
 	}
 
-	if err := takeOwnership(); err != nil {
-		if _, ok := err.(xproto.AccessError); ok {
-			log.Fatal("couldn't take ownership")
-		}
-		log.Fatal(err)
-	}
+	xroot = setup.Roots[0]
+	initAtoms()
 
 	const (
 		loKey = 8
@@ -109,6 +114,13 @@ func main() {
 
 	for i := 0; i <hiKey-loKey+1; i++ {
 		keymap[loKey + i] = reply.Keysyms[i*int(reply.KeysymsPerKeycode):(i+1)*int(reply.KeysymsPerKeycode)]
+	}
+
+	if err := takeOwnership(); err != nil {
+		if _, ok := err.(xproto.AccessError); ok {
+			log.Fatal("couldn't take ownership")
+		}
+		log.Fatal(err)
 	}
 
 	tree, err := xproto.QueryTree(xc, xroot.Root).Reply()
@@ -136,6 +148,31 @@ func main() {
 		}
 	}
 
+	/*desktopXWin, err := xproto.NewWindowId(xc)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := xproto.CreateWindowChecked(
+		xc,
+		xroot.RootDepth,
+		desktopXWin,
+		xroot.Root,
+		0,
+		0,
+		xroot.WidthInPixels,
+		xroot.HeightInPixels,
+		0,
+		xproto.WindowClassInputOutput,
+		xroot.RootVisual,
+		xproto.CwOverrideRedirect | xproto.CwEventMask,
+		[]uint32{
+			1,
+			xproto.EventMaskExposure,
+		}).Check(); err != nil {
+		log.Fatal(err)
+	}
+*/
 	eventloop:
 		for {
 			xev, err := xc.WaitForEvent()
@@ -161,6 +198,11 @@ func main() {
 					}(w)
 				}
 			case xproto.ConfigureRequestEvent:
+				reply, err := xproto.ListProperties(xc, e.Window).Reply()
+				if err != nil {
+					log.Fatal(err)
+				}
+				log.Printf("List Properties reply: %v", reply.Atoms)
 				ev := xproto.ConfigureNotifyEvent{
 				Event: e.Window,
 				Window: e.Window,
@@ -174,6 +216,11 @@ func main() {
 				}
 				xproto.SendEventChecked(xc, false, e.Window, xproto.EventMaskStructureNotify, string(ev.Bytes()))
 			case xproto.MapRequestEvent:
+				reply, err := xproto.ListProperties(xc, e.Window).Reply()
+				if err != nil {
+					log.Fatal(err)
+				}
+				log.Printf("List Properties reply: %v", reply.Atoms)
 				w := workspaces["default"]
 				xproto.MapWindowChecked(xc, e.Window)
 				w.Add(e.Window)

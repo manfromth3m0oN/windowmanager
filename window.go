@@ -18,7 +18,6 @@ type workspace struct{
 var workspaces map[string]*workspace
 
 func(w *workspace) removeWindow(win xproto.Window) error {
-	fmt.Println("the window destroy function has been called")
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	// find the index of win
@@ -117,6 +116,15 @@ func (w *workspace) TileWindows() error {
 func (w *workspace) Add(win xproto.Window) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := xproto.ChangeWindowAttributesChecked(
+		xc,
+		win,
+		xproto.CwEventMask,
+		[]uint32{
+			xproto.EventMaskStructureNotify | xproto.EventMaskEnterWindow,
+		}).Check(); err != nil {
+		return err
+	}
 	w.windows = append(w.windows, managedWindow(win))
 	if err := w.TileWindows(); err != nil {
 		log.Println(err)
