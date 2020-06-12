@@ -7,7 +7,9 @@ import (
 	"github.com/BurntSushi/xgb/xproto"
 	"github.com/manfromth3m0on/windowmanageragain/keysym"
 	"log"
+	"os/exec"
 	"sync"
+	"time"
 )
 
 var xc *xgb.Conn
@@ -15,6 +17,7 @@ var xroot xproto.ScreenInfo
 var quitSignal error = errors.New("quit")
 var keymap [256][]xproto.Keysym
 var attachedScreens []xinerama.ScreenInfo
+var activeWindow *xproto.Window
 
 var (
 	atomNetActiveWindow xproto.Atom
@@ -48,6 +51,58 @@ func handleKeyPressEvent(key xproto.KeyPressEvent) error {
 		if (key.State&xproto.ModMaskShift != 0) && (key.State&xproto.ModMask4 != 0) {
 			log.Println("Quitting")
 			return quitSignal
+		}
+		return nil
+	case keysym.XK_Return:
+		if key.State & xproto.ModMask4 != 0 {
+			cmd := exec.Command("alacritty")
+			err := cmd.Start()
+			go func() {
+				cmd.Wait()
+			}()
+			return err
+		}
+		return nil
+	case keysym.XK_q:
+		switch key.State {
+		case xproto.ModMask1:
+			//WM_DELETE_WINDOW
+			log.Printf("destroying active window: %v", activeWindow)
+			prop, err := xproto.GetProperty(xc, false, *activeWindow, atomWMProtocols,
+				xproto.GetPropertyTypeAny, 0, 64).Reply()
+			if err != nil {
+				return err
+			}
+			if prop == nil {
+				return xproto.DestroyWindowChecked(xc, *activeWindow).Check()
+			}
+			for v := prop.Value; len(v) >= 4; v = v[4:] {
+				switch xproto.Atom( uint32(v[0]) | uint32(v[1]) <<8 | uint32(v[2]) <<16 | uint32(v[3]) <<24) {
+				case atomWMDeleteWindow:
+					t := time.Now().Unix()
+					return xproto.SendEventChecked(
+						xc,
+						false,
+						*activeWindow,
+						xproto.EventMaskNoEvent,
+						string(xproto.ClientMessageEvent{
+							Format: 32,
+							Window: *activeWindow,
+							Type: atomWMProtocols,
+							Data: xproto.ClientMessageDataUnionData32New([]uint32{
+								uint32(atomWMDeleteWindow),
+								uint32(t),
+								0,
+								0,
+								0,
+							}),
+						}.Bytes())).Check()
+				}
+			}
+		case xproto.ModMaskShift | xproto.ModMask4:
+			// Destroy active window
+			log.Printf("forcefully destroying active window: %v", activeWindow)
+			return xproto.DestroyWindowChecked(xc, *activeWindow).Check()
 		}
 		return nil
 	default:
@@ -129,6 +184,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	grabkeys()
+
 	if tree != nil {
 		workspaces = make(map[string]*workspace)
 		defaultw := &workspace{mu: &sync.Mutex{}}
@@ -197,6 +255,9 @@ func main() {
 						}
 					}(w)
 				}
+				if activeWindow != nil && e.Window == *activeWindow {
+					activeWindow = nil
+				}
 			case xproto.ConfigureRequestEvent:
 				reply, err := xproto.ListProperties(xc, e.Window).Reply()
 				if err != nil {
@@ -216,16 +277,51 @@ func main() {
 				}
 				xproto.SendEventChecked(xc, false, e.Window, xproto.EventMaskStructureNotify, string(ev.Bytes()))
 			case xproto.MapRequestEvent:
-				reply, err := xproto.ListProperties(xc, e.Window).Reply()
-				if err != nil {
-					log.Fatal(err)
+				if winatrib, err := xproto.GetWindowAttributes(xc, e.Window).Reply(); err != nil || !winatrib.OverrideRedirect {
+					w := workspaces["default"]
+					xproto.MapWindowChecked(xc, e.Window)
+					w.Add(e.Window)
+					w.TileWindows()
 				}
-				log.Printf("List Properties reply: %v", reply.Atoms)
-				w := workspaces["default"]
-				xproto.MapWindowChecked(xc, e.Window)
-				w.Add(e.Window)
+			case xproto.EnterNotifyEvent:
+				activeWindow = &e.Event
+				prop, err := xproto.GetProperty(xc, false, e.Event, atomWMProtocols,
+					xproto.GetPropertyTypeAny, 0, 64).Reply()
+				focused := false
+				if err == nil {
+				TakeFocusPropLoop:
+					for v := prop.Value; len(v) >= 4; v = v[4:] {
+						switch xproto.Atom( uint32(v[0]) | uint32(v[1]) <<8 | uint32(v[2]) <<16 | uint32(v[3]) << 24 ) {
+						case atomWMTakeFocus:
+							xproto.SendEventChecked(
+								xc,
+								false,
+								e.Event,
+								xproto.EventMaskNoEvent,
+								string(xproto.ClientMessageEvent{
+									Format: 32,
+									Window: *activeWindow,
+									Type:   atomWMProtocols,
+									Data: xproto.ClientMessageDataUnionData32New([]uint32{
+										uint32(atomWMTakeFocus),
+										uint32(e.Time),
+										0,
+										0,
+										0,
+									}),
+								}.Bytes())).Check()q
+							focused = true
+							break TakeFocusPropLoop
+						}
+					}
+				}
+				if !focused {
+					if _, err := xproto.SetInputFocusChecked(xc, 0, e.Event, e.Time).Reply(); err != nil {
+						log.Println(err)
+					}
+				}
 			default:
-				log.Println(len(attachedScreens))
+				log.Println("Event not in event loop case")
 			}
 		}
 }
